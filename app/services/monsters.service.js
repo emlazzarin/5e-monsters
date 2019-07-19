@@ -56,7 +56,9 @@
 			var monster = new monsterFactory.Monster(monsterData);
 
 			if ( byId[monster.id] ) {
-				console.warn("Duplicate ID", monster.id, monster.fid);
+				// We already have this monster from some other source, so just merge it
+				// with the existing entry
+				byId[monster.id].merge(monster)
 				return;
 			}
 
@@ -76,7 +78,7 @@
 			var shortName = sourceData.shortname;
 			var initialState = custom || !!(sourceData.defaultselected || "").match(/yes/i);
 
-			if ( miscLib.sourceFilters[name] ) {
+			if ( miscLib.sourceFilters[name] !== undefined ) {
 				console.warn("Duplicate source", name);
 				return;
 			}
@@ -85,6 +87,12 @@
 			miscLib.sources.push(name);
 			miscLib.sourceFilters[name] = initialState;
 			miscLib.shortNames[name] = shortName;
+
+			if ( !miscLib.sourcesByType[sourceData.type] ) {
+				miscLib.sourcesByType[sourceData.type] = [];
+			}
+
+			miscLib.sourcesByType[sourceData.type].push(name);
 
 			if ( custom ) {
 				$rootScope.$broadcast("custom-source-added", name);
@@ -115,7 +123,7 @@
 				crString = all[i].cr.string;
 				crIndex = byCr[crString].indexOf(all[i]);
 				if ( crIndex !== -1 ) {
-					byCr.splice(crIndex, 1);
+					byCr[crString].splice(crIndex, 1);
 				}
 				all.splice(i, 1);
 			} else {

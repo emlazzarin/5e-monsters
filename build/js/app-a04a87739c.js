@@ -363,8 +363,8 @@
         .module('app')
         .controller('CurrentEncounterController', CurrentEncounterController);
 
-    CurrentEncounterController.$inject = ['encounter','partyInfo'];
-    function CurrentEncounterController(encounter, partyInfo) {
+    CurrentEncounterController.$inject = ['encounter','partyInfo', 'integration'];
+    function CurrentEncounterController(encounter, partyInfo, integration) {
         var vm = this;
         
         vm.encounter = encounter;
@@ -373,12 +373,15 @@
         vm.isPool = vm.encounter.type == 'pool';
         vm.newEncounter = newEncounter;
         vm.partyInfo = partyInfo;
+        vm.totalMonsters = 10;
+
+        vm.launchImpInit = integration.launchImpInit;
 
         var lastDifficulty = "medium";
         
         function generateRandom(difficulty) {
             difficulty = difficulty || lastDifficulty;
-            encounter.generateRandom(vm.filters, difficulty);
+            encounter.generateRandom(vm.filters, difficulty, vm.totalMonsters);
             lastDifficulty = difficulty;
         }
 
@@ -638,6 +641,7 @@
 		vm.legendaryList = metaInfo.legendaryList;
 		vm.encounters = library.encounters;
 		vm.sortChoices = metaInfo.sortChoices;
+		window.sources = sources;
 
 		// Cache sorted data to avoid infinite digest
 		var contentCacheKey;
@@ -710,68 +714,45 @@
 			vm.filters.legendary = null;
 		}
 
-		function updateSourceFilters(newValue) {
-			if (newValue) {
-				vm.filters.sources = newValue;
+		function updateSourceFilters({ type, enabled }) {
+			sources.sourcesByType[type].forEach(name => vm.filters.source[name] = enabled);
+		}
+
+		let sourceSections = [];
+		let sourceSectionKey;
+		$scope.getSourceSections = function () {
+			let key = sources.all.join();
+
+			if ( key !== sourceSectionKey ) {
+				sourceSectionKey = key;
+
+				sourceSections = Object.keys(sources.sourcesByType).map(sourceType => ({
+					name: sourceType,
+					sources: sources.sourcesByType[sourceType].slice().sort(),
+				}));
+
+				sourceSections.sort((a, b) => {
+					let aName = a.name;
+					let bName = b.name;
+					let aIsOfficial = aName.match(/Official/);
+					let bIsOfficial = bName.match(/Official/);
+
+					// Sort official types to the top, then sort by name
+					if ( aIsOfficial && !bIsOfficial ) {
+						return -1;
+					} else if ( !aIsOfficial && bIsOfficial ) {
+						return 1;
+					} else {
+						if ( aName > bName ) {
+							return 1;
+						} else {
+							return -1;
+						}
+					}
+				});
 			}
 
-			// The default is core, but for implementation reasons it's represented by the empty string
-			var sourceTypes = vm.filters.sources || "core";
-
-			// If we're selecting everything, turn everything on. Otherwise turn everything off and
-			// then selectively turn things on
-			sources.all.forEach(function (sourceName) {
-				vm.filters.source[sourceName] = (sourceTypes === "all");
-			});
-			
-			switch (sourceTypes) {
-				// non-core WotC products
-				case "official":
-					[
-						"Curse of Strahd",
-						"Hoard of the Dragon Queen",
-						"HotDQ supplement",
-						"Out of the Abyss",
-						"Princes of the Apocalypse",
-						"Princes of the Apocalypse Online Supplement v1.0",
-						"Rise of Tiamat",
-						"Storm King's Thunder",
-						"Tales from the Yawning Portal",
-						"The Tortle Package",
-						"Tomb of Annihilation",
-					].forEach(function (sourceName) {
-						vm.filters.source[sourceName] = true;
-					});
-					// no break here
-				case "core":
-					[
-						"Basic Rules v1",
-						"Monster Manual",
-						"Mordenkainen's Tome of Foes",
-						"Player's Handbook",
-						"Volo's Guide to Monsters",
-					].forEach(function (sourceName) {
-						vm.filters.source[sourceName] = true;
-					});
-					break;
-				// non-WotC products
-				case "3rdparty":
-					[
-						"Demon Cults & Secret Societies",
-						"Fifth Edition Foes",
-						"Monster Module",
-						"Monster-A-Day",
-						"Monsters of the Orient",
-						"Nerzugal's Extended Bestiary",
-						"Primeval Thule Campaign Setting",
-						"Primeval Thule Gamemaster's Companion",
-						"Tome of Beasts",
-						"Ultimate Bestiary Revenge of the Horde",
-					].forEach(function (sourceName) {
-						vm.filters.source[sourceName] = true;
-					});
-					break;
-			}
+			return sourceSections; 
 		}
 	}
 })();
@@ -1276,6 +1257,8 @@
 					return out;
 				});
 
+			monster.sortSources();
+
 			monster.sizeSort = parseSize(monster.size);
 			monster.searchable = [
 				monster.name,
@@ -1289,6 +1272,16 @@
 				monster.tags
 			).join("|").toLowerCase();
 		}
+		Monster.prototype.merge = function (monster) {
+			// If the same monster is found in multiple sheets, merge them. Right now that means just combining their sources.
+			monster.sources.forEach(source => this.sources.push(source));
+			this.sortSources();
+		};
+		Monster.prototype.sortSources = function () {
+			this.sources.sort(sourceCompare);
+		};
+
+		const sourceCompare = (a, b) => a.name.localeCompare(b.name, 'en', { sensitivity: "base" });
 
 		function parseAlignment(alignmentString) {
 			var flags = (alignmentString || "")
@@ -1944,10 +1937,10 @@
 			encounter.reference = null;
 		}
 
-		function generateRandom(filters, targetDifficulty) {
+		function generateRandom(filters, targetDifficulty, maxMonsters) {
 			targetDifficulty = targetDifficulty || 'medium';
 			var totalTargetExp = partyInfo.totalPartyExpLevels[targetDifficulty];
-			var monsters = randomEncounter.getRandomEncounter(partyInfo.totalPlayerCount, totalTargetExp, filters),
+			var monsters = randomEncounter.getRandomEncounter(partyInfo.totalPlayerCount, totalTargetExp, filters, maxMonsters),
 				i;
 
 			encounter.reset();
@@ -2043,13 +2036,13 @@
 
 
 	// var payload = [{ "Name": "Nemo", "HP": { "Value": 10 } }, { "Name": "Fat Goblin", "HP": { "Value": 20 }, "Id": "mm.goblin"}, { "Id": "mm.goblin"}];
-	var target = "http://improved-initiative.com/launchencounter/";
+	var target = "https://www.improved-initiative.com/launchencounter/";
 	ExportService.$inject = ["$document", "encounter", "players"];
 	function ExportService($document, encounter, players) {
 		function launchImpInit() {
 			var payload = generatePayload({
-				monsters: encounter.groups,
-				players: players.selectedParty,
+				monsters: encounter.groups || [],
+				players: players.selectedParty || [],
 			});
 
 			console.log(payload);
@@ -2267,6 +2260,7 @@
 		var crs = [],
 			sourceFilters = {},
 			sources = [],
+			sourcesByType = {},
 			shortNames = {},
 			tags = {},
 			i;
@@ -2283,6 +2277,7 @@
 			getMultiplier: getMultiplier,
 			sourceFilters: sourceFilters,
 			sources: sources,
+			sourcesByType: sourcesByType,
 			shortNames: shortNames,
 			tags: tags,
 		};
@@ -2391,7 +2386,9 @@
 			var monster = new monsterFactory.Monster(monsterData);
 
 			if ( byId[monster.id] ) {
-				console.warn("Duplicate ID", monster.id, monster.fid);
+				// We already have this monster from some other source, so just merge it
+				// with the existing entry
+				byId[monster.id].merge(monster)
 				return;
 			}
 
@@ -2411,7 +2408,7 @@
 			var shortName = sourceData.shortname;
 			var initialState = custom || !!(sourceData.defaultselected || "").match(/yes/i);
 
-			if ( miscLib.sourceFilters[name] ) {
+			if ( miscLib.sourceFilters[name] !== undefined ) {
 				console.warn("Duplicate source", name);
 				return;
 			}
@@ -2420,6 +2417,12 @@
 			miscLib.sources.push(name);
 			miscLib.sourceFilters[name] = initialState;
 			miscLib.shortNames[name] = shortName;
+
+			if ( !miscLib.sourcesByType[sourceData.type] ) {
+				miscLib.sourcesByType[sourceData.type] = [];
+			}
+
+			miscLib.sourcesByType[sourceData.type].push(name);
 
 			if ( custom ) {
 				$rootScope.$broadcast("custom-source-added", name);
@@ -2450,7 +2453,7 @@
 				crString = all[i].cr.string;
 				crIndex = byCr[crString].indexOf(all[i]);
 				if ( crIndex !== -1 ) {
-					byCr.splice(crIndex, 1);
+					byCr[crString].splice(crIndex, 1);
 				}
 				all.splice(i, 1);
 			} else {
@@ -2759,10 +2762,10 @@
 			//		targetTotalExp: The experience target value. Takes into account player count, player level, and target difficulty already.
 			//		filters: Any filters that should be applied when making the encounter
 			//
-			getRandomEncounter: function (playerCount, targetTotalExp, filters) {
+			getRandomEncounter: function (playerCount, targetTotalExp, filters, maxMonsters) {
 				var fudgeFactor = 1.1, // The algorithm is conservative in spending exp, so this tries to get it closer to the actual medium value
 					baseExpBudget = targetTotalExp * fudgeFactor,
-					encounterTemplate = getEncounterTemplate(),
+					encounterTemplate = getEncounterTemplate(maxMonsters),
 					multiplier = miscLib.getMultiplier(playerCount, encounterTemplate.total),
 					availableExp = baseExpBudget / multiplier,
 					monster,
@@ -2799,9 +2802,10 @@
 
 		return randomEncounter;
 
-		function getEncounterTemplate() {
+		function getEncounterTemplate(maxMonsters) {
 			var templates = [
 					[ 1 ],
+					[ 1, 1 ],
 					[ 1, 2 ],
 					[ 1, 5 ],
 					[ 1, 1, 1 ],
@@ -2810,8 +2814,14 @@
 					[ 2, 2 ],
 					[ 2, 4 ],
 					[ 8 ],
-				],
-				groups = JSON.parse(JSON.stringify(templates[Math.floor(Math.random() * templates.length)])),
+				];
+			if (maxMonsters) {
+				templates = templates.filter(function(t) {
+					let sum = t.reduce(function (a, b) { return a+b; });
+					return sum <= maxMonsters;
+				});
+			}
+			var groups = JSON.parse(JSON.stringify(templates[Math.floor(Math.random() * templates.length)])),
 				total = groups.reduce(function (a, b) { return a+b; });
 
 			// Silly hack to clone object
@@ -3270,6 +3280,7 @@ function sheetManager($q, googleSheetLoader, monsters, store) {
 			all: misc.sources,
 			filters: misc.sourceFilters,
 			shortNames: misc.shortNames,
+			sourcesByType: misc.sourcesByType,
 		};
 	}
 })();
@@ -3455,18 +3466,18 @@ function sheetManager($q, googleSheetLoader, monsters, store) {
 
 angular.module('app').run(['$templateCache', function($templateCache) {$templateCache.put('app/test.html','<div class=container-fluid role=main>This is version {{vm.appVersion}}</div>');
 $templateCache.put('app/about/about.html','<div class=container><div class="about--logo pull-right"><img src=images/logo.png class=img-responsive alt=Logo></div><h2>Contact us if you have questions or issues</h2><h3>Questions, comments, suggestions?</h3><a href=http://kobold.club/5e-monsters/help.html target=_blank>See the FAQ</a><h3>Via Reddit</h3><a href=http://www.reddit.com/r/asmor target=_blank>Asmor\'s Official Subreddit</a><h3>Contact the Maintainers Directly</h3><dl class=dl-horizontal><dt>Site Owner:</dt><dd>Ian Toltz</dd><dd><a href=mailto:itoltz@gmail.com>itoltz@gmail.com</a><dd><a href=http://reddit.com/u/Asmor target=_blank>/u/Asmor</a></dd></dd></dl><dl class=dl-horizontal><dt>Site Contributor:</dt><dd>Joe Barzilai</dd><dd><a href=mailto:jabber3+kobold@gmail.com>jabber3@gmail.com</a><dd><a href=http://reddit.com/u/jabber3 target=_blank>/u/jabber3</a></dd></dd></dl><dl class=dl-horizontal><dt>Logo by:</dt><dd>Jin The Blue</dd></dl><h3>Want to Contribute?</h3><p>Join us on the <a href=https://github.com/Asmor/5e-monsters>Kobold Github</a></p><p class="about--disclaimer lead">Kobold Fight Club is not associated with Wizards of the Coast.</p></div>');
-$templateCache.put('app/battle-setup/battle-setup.html','<div class=combat-setup-controls><button class="btn btn-danger btn-lg" ui-sref=battle-tracker>Fight!</button> <button class="btn btn-lg combat-setup-controls--imp-init-button" ng-click=vm.launchImpInit()>Run in Improved Initiative</button></div><combatant-setup ng-repeat="combatant in vm.combat.combatants" combatant=combatant></combatant-setup>');
+$templateCache.put('app/battle-setup/battle-setup.html','<div class=combat-setup-controls><button class="btn btn-danger btn-lg" ui-sref=battle-tracker>Fight!</button> <button class="btn btn-lg launch-in-imp-init-button" ng-click=vm.launchImpInit()>Run in Improved Initiative</button></div><combatant-setup ng-repeat="combatant in vm.combat.combatants" combatant=combatant></combatant-setup>');
 $templateCache.put('app/battle-setup/combatant-setup.html','<div class=combatant-setup ng-class="\'combatant-setup__\' + vm.combatant.type"><span class=combatant-setup--name><input class="combatant-setup--input combatant-setup--input__name" ng-model=vm.combatant.name></span> <span class=combatant-setup--initative-mod><span ng-if=!vm.combatant.fixedInitiative>Initiative Mod: <span ng-if="vm.combatant.initiativeMod >= 0">+</span>{{ vm.combatant.initiativeMod }} <span ng-if=vm.combatant.advantageOnInitiative>(A)</span></span></span> <span class=combatant-setup--initative>Initiative: <span ng-if=!vm.combatant.fixedInitiative><number-input model=vm.combatant.initiative buttons="[-1, 1]"></number-input><button class="combatant-setup--button combatant-setup--button__roll" ng-click=vm.combat.rollInitiative(vm.combatant) ng-if=!vm.combatant.initiativeRolled>Roll</button></span> <span ng-if=vm.combatant.fixedInitiative>{{ vm.combatant.initiative }}</span></span> <span class=combatant-setup--hp><span ng-if=!vm.combatant.noHp>HP:<number-input model=vm.combatant.hp buttons="[-5, -1, 1, +5]" ng-if="vm.combatant.type != \'player\'"></number-input><span ng-if="vm.combatant.type == \'player\'">{{ vm.combatant.hp - vm.combatant.damage }} / {{ vm.combatant.hp }}</span></span></span></div>');
 $templateCache.put('app/battle-tracker/battle-tracker.html','<div class=combat-controls><number-input model=vm.combat.delta buttons="[-10, -5, -1, 1, 5, 10]" non-negative=true></number-input><button class=combat-controls--next-turn ng-click=vm.combat.nextTurn()>Next turn</button></div><combatant ng-repeat="combatant in vm.combat.combatants" combatant=combatant></combatant>');
 $templateCache.put('app/battle-tracker/combatant.html','<div class="combatant combatant__{{ vm.combatant.type }}" ng-class="{ \'combatant__active\': vm.combatant.active }"><span class=combatant--name>{{ vm.combatant.name }}</span> <span class=combatant--initiative-label>Initiative:</span> <span class=combatant--initiative>{{ vm.combatant.initiative }}</span> <span class=combatant--hp-label><span ng-if=!vm.combatant.noHp>HP:</span></span> <span class=combatant--hp><span ng-if=!vm.combatant.noHp>{{ vm.combatant.hp - vm.combatant.damage }} / {{ vm.combatant.hp }}</span></span> <span class=combatant--apply><span ng-show="vm.combat.delta && !vm.combatant.noHp"><button class=combatant--apply-button ng-click=vm.combat.applyDelta(vm.combatant)>Damage {{ vm.combat.delta }}</button> <button class=combatant--apply-button ng-click="vm.combat.applyDelta(vm.combatant, -1)">Heal {{ vm.combat.delta }}</button></span></span></div>');
 $templateCache.put('app/common/difficulty-legend.html','<h3 ng-if=vm.showHeader>Legend</h3><ul><li class=difficulty-legend__deadly>Deadly: One of these is a deadly challenge</li><li class=difficulty-legend__hard>Hard: One of these is a hard challenge</li><li class=difficulty-legend__medium>Medium: One of these is a medium challenge</li><li class=difficulty-legend__easy>Easy: One of these is an easy challenge</li><li class=difficulty-legend__pair>Pair: Two of these is a medium challenge</li><li class=difficulty-legend__group>Group: Four of these is a medium challenge</li><li class=difficulty-legend__trivial>Trivial: Eight or more of these is a medium challenge</li></ul>');
 $templateCache.put('app/common/number-input.html','<span class=number-input><button class="number-input--button number-input--button__negative" ng-class="{\'number-input--button__hidden\' : vm.hideNegative()}" ng-repeat="mod in vm.mods | negative" ng-click=vm.modify(mod)>{{ mod }}</button> <span class=number-input--value>{{ vm.value }}</span> <button class="number-input--button number-input--button__positive" ng-repeat="mod in vm.mods | positive" ng-click=vm.modify(mod)>+{{ mod }}</button></span>');
-$templateCache.put('app/encounter-builder/current-encounter.html','<h2><span ng-if=!vm.isPool>Encounter Info</span> <span ng-if=vm.isPool>Random Encounter Table</span><div ng-if=!vm.isPool class="btn-group pull-right"><button class="btn btn-info" ng-click=vm.generateRandom()>{{vm.randomButtonText()}}</button> <button type=button class="btn btn-info dropdown-toggle" data-toggle=dropdown aria-haspopup=true aria-expanded=false><span class=caret></span> <span class=sr-only>Toggle Dropdown</span></button><ul class=dropdown-menu><li><a href=# ng-click="vm.generateRandom(\'easy\')">Random Easy</a></li><li><a href=# ng-click="vm.generateRandom(\'medium\')">Random Medium</a></li><li><a href=# ng-click="vm.generateRandom(\'hard\')">Random Hard</a></li><li><a href=# ng-click="vm.generateRandom(\'deadly\')">Random Deadly</a></li></ul></div></h2><p class="current-encounter--empty bg-info text-muted" ng-if="vm.encounter.qty == 0">Create an encounter by clicking the Random encounter button or by adding monsters from the monsters table.</p><div class=current-encounter ng-class="{ \'current-encounter__shown\': vm.encounter.qty }"><div class=current-encounter--body><div class=current-encounter--table><div class=current-encounter--row ng-repeat="group in vm.encounter.groups | sortEncounter"><div class=current-encounter--monster-info><span class="current-encounter--monster-name text-capitalized">{{ group.monster.name }}</span><div><span class=current-encounter--monster-cr>CR: {{ group.monster.cr.string }}</span> <span class=current-encounter--monster-xp>XP: {{ group.monster.cr.exp | number}}</span><div class=current-encounter--monster-source ng-repeat="source in group.monster.sources" ng-show=vm.filters.source[source.name] title="{{source.name}} p.{{source.page}}">{{ source.name }} <span ng-if=source.page>p.{{ source.page }}</span> <span ng-if=source.url><a target=_blank href="{{ source.url }}">[Link]</a></span></div></div></div><div class=current-encounter--monster-qty-col ng-if=!vm.isPool><button ng-click="vm.encounter.randomize(group.monster, vm.filters)" class="btn btn-default" title="Randomize Monster"><i class="fa fa-random"></i></button> <input class="current-encounter--monster-qty form-control input-lg" type=number ng-model=group.qty><div class=current-encounter--monster-qty-btns><button ng-click=vm.encounter.add(group.monster) class="btn btn-xs btn-success"><i class="fa fa-plus"></i></button> <button ng-click=vm.encounter.remove(group.monster) class="btn btn-xs btn-danger"><i class="fa fa-minus"></i></button></div></div></div></div><div class=current-encounter--totals ng-if=!vm.isPool><div class=current-encounter--totals-difficulty>Difficulty: {{ vm.encounter.difficulty }}</div><div class=current-encounter--totals-xp><span>Total XP: {{ vm.encounter.exp | number }} <span class=current-encounter--totals-individual-xp ng-if="vm.partyInfo.totalPlayerCount > 0">({{ (vm.encounter.exp / vm.partyInfo.totalPlayerCount) | number:0 }} per player)</span></span> <span>Adjusted XP: {{ vm.encounter.adjustedExp | number }} <span class=current-encounter--totals-individual-xp ng-if="vm.partyInfo.totalPlayerCount > 0">({{ (vm.encounter.adjustedExp / vm.partyInfo.totalPlayerCount) | number:0 }} per player)</span></span></div></div><div class=current-encounter--btns><button class="btn btn-danger btn-new" ng-click=vm.newEncounter()>New</button> <button class="btn btn-primary" ui-sref=encounter-manager ng-if=!vm.encounter.reference>Save</button></div></div></div>');
+$templateCache.put('app/encounter-builder/current-encounter.html','<h2><span ng-if=!vm.isPool>Encounter Info</span> <span ng-if=vm.isPool>Random Encounter Table</span><div ng-if=!vm.isPool class="btn-group pull-right"><button class="btn btn-info" ng-click=vm.generateRandom()>{{vm.randomButtonText()}}</button> <button type=button class="btn btn-info dropdown-toggle" data-toggle=dropdown aria-haspopup=true aria-expanded=false><span class=caret></span> <span class=sr-only>Toggle Dropdown</span></button><ul class=dropdown-menu><li><a href=# ng-click="vm.generateRandom(\'easy\')">Random Easy</a></li><li><a href=# ng-click="vm.generateRandom(\'medium\')">Random Medium</a></li><li><a href=# ng-click="vm.generateRandom(\'hard\')">Random Hard</a></li><li><a href=# ng-click="vm.generateRandom(\'deadly\')">Random Deadly</a></li></ul></div></h2><p>No more than <input class="current-encounter--total-monsters form-control input-sm" type=number ng-model=vm.totalMonsters> monster<span ng-if="vm.totalMonsters != 1">s</span></p><p class="current-encounter--empty bg-info text-muted" ng-if="vm.encounter.qty == 0">Create an encounter by clicking the Random encounter button or by adding monsters from the monsters table.</p><div class=current-encounter ng-class="{ \'current-encounter__shown\': vm.encounter.qty }"><div class=current-encounter--body><div class=current-encounter--table><div class=current-encounter--row ng-repeat="group in vm.encounter.groups | sortEncounter"><div class=current-encounter--monster-info><span class="current-encounter--monster-name text-capitalized">{{ group.monster.name }}</span><div><span class=current-encounter--monster-cr>CR: {{ group.monster.cr.string }}</span> <span class=current-encounter--monster-xp>XP: {{ group.monster.cr.exp | number}}</span><div class=current-encounter--monster-source ng-repeat="source in group.monster.sources" ng-show=vm.filters.source[source.name] title="{{source.name}} p.{{source.page}}">{{ source.name }} <span ng-if=source.page>p.{{ source.page }}</span> <span ng-if=source.url><a target=_blank href="{{ source.url }}">[Link]</a></span></div></div></div><div class=current-encounter--monster-qty-col ng-if=!vm.isPool><button ng-click="vm.encounter.randomize(group.monster, vm.filters)" class="btn btn-default" title="Randomize Monster"><i class="fa fa-random"></i></button> <input class="current-encounter--monster-qty form-control input-lg" type=number ng-model=group.qty><div class=current-encounter--monster-qty-btns><button ng-click=vm.encounter.add(group.monster) class="btn btn-xs btn-success"><i class="fa fa-plus"></i></button> <button ng-click=vm.encounter.remove(group.monster) class="btn btn-xs btn-danger"><i class="fa fa-minus"></i></button></div></div></div></div><div class=current-encounter--totals ng-if=!vm.isPool><div class=current-encounter--totals-difficulty>Difficulty: {{ vm.encounter.difficulty }}</div><div class=current-encounter--totals-xp><span>Total XP: {{ vm.encounter.exp | number }} <span class=current-encounter--totals-individual-xp ng-if="vm.partyInfo.totalPlayerCount > 0">({{ (vm.encounter.exp / vm.partyInfo.totalPlayerCount) | number:0 }} per player)</span></span> <span>Adjusted XP: {{ vm.encounter.adjustedExp | number }} <span class=current-encounter--totals-individual-xp ng-if="vm.partyInfo.totalPlayerCount > 0">({{ (vm.encounter.adjustedExp / vm.partyInfo.totalPlayerCount) | number:0 }} per player)</span></span></div></div><div class=current-encounter--btns><button class="btn btn-danger btn-new" ng-click=vm.newEncounter()>New</button> <button class="btn btn-primary" ui-sref=encounter-manager ng-if=!vm.encounter.reference>Save</button> <button class="btn launch-in-imp-init-button" ng-click=vm.launchImpInit()>Run in Improved Initiative</button></div></div></div>');
 $templateCache.put('app/encounter-builder/encounter-builder.html','<div class="encounter-builder container-fluid" role=main><div class=row><div class=col-md-4><group-info></group-info><div class=encounter-builder--current-encounter-container><div class=encounter-builder--current-encounter-slider ng-class="{\'encounter-builder--current-encounter-slider__shown\': encounterShown }"><div class=encounter-builder--encounter-info-bar ng-click="encounterShown = !encounterShown"><i class="fa encounter-builder--toggle-arrow" ng-class="{ \'fa-toggle-up\': !encounterShown, \'fa-toggle-down\': encounterShown }" aria-hidden=true></i><div class=encounter-builder--encounter-info-text><span ng-if=vm.encounter.exp>{{ vm.getMonsterQtyString() }}, {{ vm.encounter.exp }} exp ({{ vm.encounter.difficulty }})</span> <span ng-if=!vm.encounter.exp><span ng-if=encounterShown>Browse monsters</span> <span ng-if=!encounterShown>Manage encounter</span></span></div></div><div class=encounter-builder--current-encounter><current-encounter filters=vm.filters></current-encounter></div></div></div><div class="difficulty-legend hidden-xs hidden-sm"><button class="btn btn-warning difficulty-legend-button" type=button data-toggle=collapse data-target=#legend-collapse>Legend <i class="fa fa-angle-double-up" aria-hidden=true></i></button><div id=legend-collapse class="difficulty-legend-popout collapse" aria-expanded=false aria-controls=legend-collapse><difficulty-legend></difficulty-legend></div></div></div><div class=col-md-8><search-controls filters=vm.filters></search-controls><monster-table filters=vm.filters></monster-table><div class="difficulty-legend-sm visible-xs visible-sm"><difficulty-legend show-header=true></difficulty-legend></div></div></div></div>');
 $templateCache.put('app/encounter-builder/group-info.html','<div class=group-info><div class=group-info--input><h2 class=group-info--header>Group Info</h2><div class="group-info--party-level-row row" ng-repeat="partyLevel in vm.partyInfo.partyLevels"><party-level-selector party-level=partyLevel first=$first></party-level-selector></div><button class="btn btn-xs btn-info group-info--add-level" title="Add Another Party Level" ng-click=vm.addPartyLevel()><i class="fa fa-plus"></i> Add Another Level</button></div><ul class="group-info--guidelines list-unstyled"><li ng-class="{\'group-info--guidelines-active\': vm.encounter.difficulty === \'Easy\'}"><span>Easy:</span> <span class=group-info--guidelines-values>{{ vm.partyInfo.totalPartyExpLevels.easy | number }} exp</span></li><li ng-class="{\'group-info--guidelines-active\': vm.encounter.difficulty === \'Medium\'}"><span>Medium:</span> <span class=group-info--guidelines-values>{{ vm.partyInfo.totalPartyExpLevels.medium | number }} exp</span></li><li ng-class="{\'group-info--guidelines-active\': vm.encounter.difficulty === \'Hard\'}"><span>Hard:</span> <span class=group-info--guidelines-values>{{ vm.partyInfo.totalPartyExpLevels.hard | number }} exp</span></li><li ng-class="{\'group-info--guidelines-active\': vm.encounter.difficulty === \'Deadly\'}"><span>Deadly:</span> <span class=group-info--guidelines-values>{{ vm.partyInfo.totalPartyExpLevels.deadly | number }} exp</span></li><br><li><span>Daily Budget:</span> <span class="group-info--guidelines-values pt-1">{{ vm.partyInfo.totalPartyExpLevels.budget | number }} exp</span></li></ul></div>');
 $templateCache.put('app/encounter-builder/monster-table.html','<div class="monster-table table-responsive"><table class="monster-table--table table table-bordered table-striped"><thead><tr><th class="monster-table--column monster-table--column__button"></th><th class="monster-table--column monster-table--column__sortable monster-table--column__name" ng-click="vm.filters.sort = \'name\'">Name</th><th class="monster-table--column monster-table--column__sortable monster-table--column__cr" ng-click="vm.filters.sort = \'cr\'">CR</th><th class="monster-table--column monster-table--column__sortable monster-table--column__size" ng-click="vm.filters.sort = \'size\'">Size</th><th class="monster-table--column monster-table--column__sortable monster-table--column__type" ng-click="vm.filters.sort = \'type\'">Type</th><th class="monster-table--column monster-table--column__sortable monster-table--column__alignment" ng-click="vm.filters.sort = \'alignment\'">Alignment</th><th class="monster-table--column monster-table--column__source">Source</th></tr></thead><tbody><tr class=monster-table--warning-row ng-if="vm.filters.search && (vm.monsters | countHiddenMonstersFilter:vm.filters) > 0"><td colspan=7 class=monster-table--filter-warning-cell>{{ vm.monsters | countHiddenMonstersFilter:vm.filters }} monsters hidden by filters or in unselected sources</td></tr></tbody><tbody><tr dir-paginate="monster in vm.monsters | monstersFilter:vm.filters | itemsPerPage: vm.filters.pageSize" class=monster-table--row><td class=monster-table--button-cell><button ng-click=vm.encounter.add(monster) class="btn btn-sm btn-success"><i class="fa fa-plus"></i></button></td><td class=monster-table--name-cell><div class=monster-table--name>{{ monster.name }}</div><div ng-if=monster.section class=monster-table--section><span class=monster-table--label>Section:</span> {{ monster.section }}</div></td><td class=monster-table--cr-cell ng-class="\'monster-table--cr-cell__\' + vm.dangerZone(monster)"><span class=monster-table--cr-label>CR</span> {{ monster.cr.string }}</td><td class=monster-table--size-cell><span class=monster-table--label>Size:</span> {{ monster.size }}</td><td class=monster-table--type-cell><span class=monster-table--label>Type:</span> {{ monster.type }} <span ng-if=monster.tags class=monster-table--tags>({{ monster.tags.join(", ") }})</span></td><td class=monster-table--alignment-cell><span ng-if=monster.alignment><span class=monster-table--label>Alignment:</span> {{ monster.alignment.text }}</span></td><td class=monster-table--source-cell><span class=monster-table--label>Source(s):</span><div class=monster-table--sources ng-repeat="source in monster.sources" ng-show=vm.filters.source[source.name]><span class="monster-table--source-name monster-table--source-name__short" title="{{ source.name }}">{{ vm.sources.shortNames[source.name] }}</span> <span class="monster-table--source-name monster-table--source-name__long">{{ source.name }}</span> <span ng-if=source.page>p.{{ source.page }}</span> <span ng-if=source.url><a target=_blank href="{{ source.url }}">[Link]</a></span></div></td></tr></tbody></table></div><div class=pagination-container><dir-pagination-controls></dir-pagination-controls></div>');
 $templateCache.put('app/encounter-builder/party-level-selector.html','<div class=group-info--input-section><label ng-if=vm.first>Players:</label><select ng-model=vm.partyLevel.playerCount ng-options="count for count in [1,2,3,4,5,6,7,8,9,10,11,12]" ng-change=vm.save()></select></div><div class=group-info--input-section><label ng-if=vm.first>Level:</label><select ng-model=vm.partyLevel.level ng-options="level as level.level for level in vm.levels" ng-change=vm.save()></select></div><button ng-if=!vm.first class="btn btn-xs btn-danger group-info--remove-level" title="Add Different Party Level" ng-click=vm.removePartyLevel()><i class="fa fa-times"></i></button>');
-$templateCache.put('app/encounter-builder/search.html','<div class=search><div class="search--search-form form-inline"><label class=sr-only>Search</label> <input class="form-control search-input" type=text ng-model=vm.filters.search placeholder=Search...><select class=form-control ng-model=vm.filters.size ng-options="size for size in vm.sizes"><option value>Any Size</option></select><select class=form-control ng-model=vm.filters.type ng-options="type for type in vm.types"><option value>Any Type</option></select><select class=form-control ng-model=vm.filters.minCr ng-options="cr.numeric as cr.string for cr in vm.crList"><option value>Min CR</option></select><select class=form-control ng-model=vm.filters.maxCr ng-options="cr.numeric as cr.string for cr in vm.crList"><option value>Max CR</option></select><select class=form-control ng-model=vm.filters.alignment ng-options="alignment as alignment.text for (key, alignment) in vm.alignments"><option value>Any Alignment</option></select><select class=form-control ng-model=vm.filters.environment ng-options="environment as environment for environment in vm.environments"><option value>Any Environment</option></select><select class=form-control ng-model=vm.filters.legendary ng-options="legendary as legendary for legendary in vm.legendaryList"><option value>Any Legendary</option></select><span ng-if="(vm.encounters | filter:{type:\'pool\'}).length > 0"><select class="form-control search--search-form--pool-control" ng-model=vm.filters.pool ng-options="pool.name as pool.name+\' Table\' for pool in vm.encounters | filter:{type:\'pool\'}"><option value>Any Table</option></select></span><select class="form-control search--search-form--sort-control" ng-model=vm.filters.sort ng-options="sortChoice.value as \'Sort by \' + sortChoice.text for sortChoice in vm.sortChoices"></select><button type=button class="btn btn-default" data-toggle=modal data-target=#sourcesModal>Set Sources</button> <button type=button class="btn btn-default" data-toggle=modal data-target=#contentModal>Manage Content</button></div><div class=search--reset><button class="btn btn-danger" ng-click=vm.resetFilters()>Reset Filters</button><div class=search--size-controls><label>Page size:</label><select class="form-control search--page-size" ng-model=vm.filters.pageSize ng-options="page for page in [10, 25, 50, 100, 250, 500, 1000]"></select></div></div><div class=modal id=sourcesModal tabindex=-1 role=dialog aria-labelledby=myModalLabel><div class=modal-dialog role=document><div class=modal-content><div class=modal-header><button type=button class=close data-dismiss=modal aria-label=Close><span aria-hidden=true>&times;</span></button><h4 class=modal-title id=myModalLabel>Set Source Material</h4></div><div class=modal-body><div class=sources-modal--buttons><button class="btn btn-primary" ng-click="vm.updateSourceFilters(\'all\')">Everything</button> <button class="btn btn-primary" ng-click="vm.updateSourceFilters(\'official\')">Official WotC</button> <button class="btn btn-primary" ng-click="vm.updateSourceFilters(\'core\')">Core Books</button> <button class="btn btn-primary" ng-click="vm.updateSourceFilters(\'3rdparty\')">Third Party</button> <button class="btn btn-primary" ng-click="vm.updateSourceFilters(\'none\')">None</button></div><ul><li class=search--source ng-repeat="source in vm.sourceNames" ng-class="{ \'search--source__off\': !vm.filters.source[source] }"><label><input type=checkbox ng-model=vm.filters.source[source]> {{ source }}</label></li></ul></div><div class=modal-footer><button type=button class="btn btn-default" data-dismiss=modal>Close</button></div></div></div></div><div class=modal id=contentModal tabindex=-1 role=dialog aria-labelledby=myModalLabel><div class=modal-dialog role=document><div class=modal-content><div class=modal-header><button type=button class=close data-dismiss=modal aria-label=Close><span aria-hidden=true>&times;</span></button><h4 class=modal-title id=myModalLabel>Manage Content</h4></div><div class=modal-body><ul><li class="row search--content-row" ng-repeat="contentDefinition in getContent()"><div class=col-lg-1><button ng-disabled=!contentDefinition.custom class="btn btn-danger" ng-click=removeCustom(contentDefinition.id)><i class="fa fa-trash-o"></i></button></div><div class=col-lg-9>{{ contentDefinition.name }} (Last updated: {{ contentDefinition.updated }})<div><a class=search--sheet-link ng-href="https://docs.google.com/spreadsheets/d/{{ contentDefinition.id }}/">{{ contentDefinition.id }}</a></div></div></li><li class="row search--content-row"><div class=col-lg-5><input class=form-control placeholder=Name ng-model=customName></div><div class=col-lg-5><input class=form-control placeholder="URL or ID" ng-model=customUrl></div><div class=col-lg-2><button class="btn btn-primary" ng-click=addCustom()>Add</button></div></li></ul><a class="btn btn-info" href=https://github.com/Asmor/5e-monsters#contributing-content-to-kobold-fight-club>Instructions</a></div><div class=modal-footer><button type=button class="btn btn-default" data-dismiss=modal>Close</button></div></div></div></div></div>');
+$templateCache.put('app/encounter-builder/search.html','<div class=search><div class="search--search-form form-inline"><label class=sr-only>Search</label> <input class="form-control search-input" type=text ng-model=vm.filters.search placeholder=Search...><select class=form-control ng-model=vm.filters.size ng-options="size for size in vm.sizes"><option value>Any Size</option></select><select class=form-control ng-model=vm.filters.type ng-options="type for type in vm.types"><option value>Any Type</option></select><select class=form-control ng-model=vm.filters.minCr ng-options="cr.numeric as cr.string for cr in vm.crList"><option value>Min CR</option></select><select class=form-control ng-model=vm.filters.maxCr ng-options="cr.numeric as cr.string for cr in vm.crList"><option value>Max CR</option></select><select class=form-control ng-model=vm.filters.alignment ng-options="alignment as alignment.text for (key, alignment) in vm.alignments"><option value>Any Alignment</option></select><select class=form-control ng-model=vm.filters.environment ng-options="environment as environment for environment in vm.environments"><option value>Any Environment</option></select><select class=form-control ng-model=vm.filters.legendary ng-options="legendary as legendary for legendary in vm.legendaryList"><option value>Any Legendary</option></select><span ng-if="(vm.encounters | filter:{type:\'pool\'}).length > 0"><select class="form-control search--search-form--pool-control" ng-model=vm.filters.pool ng-options="pool.name as pool.name+\' Table\' for pool in vm.encounters | filter:{type:\'pool\'}"><option value>Any Table</option></select></span><select class="form-control search--search-form--sort-control" ng-model=vm.filters.sort ng-options="sortChoice.value as \'Sort by \' + sortChoice.text for sortChoice in vm.sortChoices"></select><button type=button class="btn btn-default" data-toggle=modal data-target=#sourcesModal>Set Sources</button> <button type=button class="btn btn-default" data-toggle=modal data-target=#contentModal>Manage Content</button></div><div class=search--reset><button class="btn btn-danger" ng-click=vm.resetFilters()>Reset Filters</button><div class=search--size-controls><label>Page size:</label><select class="form-control search--page-size" ng-model=vm.filters.pageSize ng-options="page for page in [10, 25, 50, 100, 250, 500, 1000]"></select></div></div><div class=modal id=sourcesModal tabindex=-1 role=dialog aria-labelledby=myModalLabel><div class=modal-dialog role=document><div class=modal-content><div class=modal-header><button type=button class=close data-dismiss=modal aria-label=Close><span aria-hidden=true>&times;</span></button><h4 class=modal-title id=myModalLabel>Set Source Material</h4></div><div class=modal-body><div class=sources-modal--source-section ng-repeat="section in getSourceSections()"><button class="btn btn-primary" ng-click="vm.updateSourceFilters({ type: section.name, enabled: true })">All</button> <button class="btn btn-primary" ng-click="vm.updateSourceFilters({ type: section.name, enabled: false })">None</button> <span class=sources-modal--source-section-header>{{ section.name }}</span><ul><li class=search--source ng-repeat="source in section.sources" ng-class="{ \'search--source__off\': !vm.filters.source[source] }"><label><input type=checkbox ng-model=vm.filters.source[source]> {{ source }}</label></li></ul></div><div><a href=https://github.com/Asmor/5e-monsters/wiki/Extra-content-for-KFC>Add additional content</a></div></div><div class=modal-footer><button type=button class="btn btn-default" data-dismiss=modal>Close</button></div></div></div></div><div class=modal id=contentModal tabindex=-1 role=dialog aria-labelledby=myModalLabel><div class=modal-dialog role=document><div class=modal-content><div class=modal-header><button type=button class=close data-dismiss=modal aria-label=Close><span aria-hidden=true>&times;</span></button><h4 class=modal-title id=myModalLabel>Manage Content</h4></div><div class=modal-body><ul><li class="row search--content-row" ng-repeat="contentDefinition in getContent()"><div class=col-lg-1><button ng-disabled=!contentDefinition.custom class="btn btn-danger" ng-click=removeCustom(contentDefinition.id)><i class="fa fa-trash-o"></i></button></div><div class=col-lg-9>{{ contentDefinition.name }} (Last updated: {{ contentDefinition.updated }})<div><a class=search--sheet-link ng-href="https://docs.google.com/spreadsheets/d/{{ contentDefinition.id }}/">{{ contentDefinition.id }}</a></div></div></li><li class="row search--content-row"><div class=col-lg-5><input class=form-control placeholder=Name ng-model=customName></div><div class=col-lg-5><input class=form-control placeholder="URL or ID" ng-model=customUrl></div><div class=col-lg-2><button class="btn btn-primary" ng-click=addCustom()>Add</button></div></li></ul><div><a href=https://github.com/Asmor/5e-monsters/wiki/Extra-content-for-KFC>Add additional content</a></div></div><div class=modal-footer><button type=button class="btn btn-default" data-dismiss=modal>Close</button></div></div></div></div></div>');
 $templateCache.put('app/encounter-manager/encounter-manager.html','<div class=encounter-manager><div class=encounter-manager--no-encounters ng-if="!vm.encounter.qty && !vm.library.encounters.length">You don\'t have any encounters saved. <button ui-sref=encounter-builder>Return to encounter builder</button></div><div class="encounter-manager-encounter encounter-manager-encounter__unsaved" ng-if="vm.encounter.qty && !vm.encounter.reference"><div class=encounter-manager-encounter--controls><input class=encounter-manager-encounter--name-input placeholder="{{ vm.newEncounter.placeholder }}" ng-model=vm.newEncounter.name> <button class=encounter-manager-encounter--save-button ng-click="vm.save(\'encounter\')">Save as Encounter</button> <button class=encounter-manager-encounter--save-button ng-click="vm.save(\'pool\')">Save as Table</button></div><div class=encounter-manager-monster ng-repeat="(id, group) in vm.encounter.groups"><span ng-if="group.qty > 1">{{ group.qty }}x</span> {{ group.monster.name }}</div></div><h3>Encounters</h3><div ng-repeat="storedEncounter in vm.library.encounters | filter:{type:\'!pool\'} track by $index"><manager-row stored-encounter=storedEncounter></manager-row></div><h3>Random Encounter Tables</h3><div class=random-encounter-pools ng-repeat="storedEncounter in vm.library.encounters | filter:{type:\'pool\'} track by $index"><manager-row stored-encounter=storedEncounter></manager-row></div></div>');
 $templateCache.put('app/encounter-manager/manager-row.html','<div class=encounter-manager-row><div class=encounter-manager-row--controls><div class=encounter-manager-row--name>{{ vm.storedEncounter.name }}</div><div class=encounter-manager-row--exp>Exp: {{ vm.calculateExp(vm.storedEncounter) }}</div><button class=encounter-manager-row--load-button ng-click=vm.load(vm.storedEncounter) ng-if="vm.encounter.reference != vm.storedEncounter">Choose</button> <button class=encounter-manager-row--remove-button ng-click=vm.remove(vm.storedEncounter)>Remove</button> <span class=encounter-manager-row--active ng-if="vm.encounter.reference == vm.storedEncounter">Active</span></div><div class=encounter-manager-monster ng-repeat="(id, qty) in vm.storedEncounter.groups"><span ng-if="qty > 1">{{ qty }}x</span> {{ vm.monsters.byId[id].name }}</div></div>');
 $templateCache.put('app/navbar/navbar.html','<nav class="navbar navbar-inverse navbar-fixed-top"><div class=container-fluid><div class=navbar-header><button type=button class="navbar-toggle collapsed" data-toggle=collapse data-target=.navbar-collapse aria-expanded=false aria-controls=navbar><span class=sr-only>Toggle navigation</span> <span class=icon-bar></span> <span class=icon-bar></span> <span class=icon-bar></span></button> <a class=navbar-brand href=#>Kobold Fight Club</a></div><div id=navbar class="collapse navbar-collapse"><ul class="nav navbar-nav navbar-right"><li ui-sref-active=active data-toggle=collapse data-target=.navbar-collapse.in><a ui-sref=encounter-builder>Home</a></li><li ui-sref-active=active data-toggle=collapse data-target=.navbar-collapse.in><a ui-sref=encounter-manager>Manage Encounters</a></li><li ui-sref-active=active data-toggle=collapse data-target=.navbar-collapse.in><a ui-sref=players.manage>Manage Players</a></li><li ui-sref-active=active data-toggle=collapse data-target=.navbar-collapse.in><a ui-sref=battle-setup>Run Encounters</a></li><li ui-sref-active=active data-toggle=collapse data-target=.navbar-collapse.in><a ui-sref=about>About</a></li></ul></div></div></nav>');
